@@ -1,24 +1,31 @@
 import net from 'net';
 import fs from 'fs';
-
+import readMails from './functions/readMails.js';
 // Define the SMTP server port
 const PORT = 2525; // Change this to 25 for real servers, 2525 for testing
-
+const inbox = "inbox";
+const SEARCH = "SEARCH";
+const SELECT = "SELECT";
 // List of clients connected to the server
 let clients = [];
+
+
 // Function to handle client connection
 const  handleClient = (socket) => {
     let mailData = {
         from: null,
         to: [],
         data: [],
-        currentState: "INIT"
+        currentState: "INIT",
+        protocol: "",
     };
     let user = "";
     let password = "";
     let authUser = {};
     let jsonData = {};
     let parsedUserData = {};
+
+    let loggedIn = false;
 
     socket.write('220 SimpleSMTPServer Ready\r\n');
 
@@ -92,20 +99,7 @@ const  handleClient = (socket) => {
 
         else if (message.startsWith('LIST')) {
             if(authUser.user && authUser.password) {
-                fs.readdir("./inbox", (err, files) => {
-                    files.forEach(file => {
-                        if(file.includes(authUser.user)) {
-                            fs.readFile(`./inbox/${file}`, 'utf8', (err, data) => {
-                                if (err) {
-                                    console.error('Virhe tiedoston lukemisessa:', err);
-                                    return;
-                                }
-                        
-                                socket.write(data);
-                            });
-                        }
-                    });
-                })
+                readMails(authUser.user);
             }
             socket.write('221 OK\r\n');
         }
@@ -116,6 +110,55 @@ const  handleClient = (socket) => {
             socket.end();
         }
 
+        else if(message.startsWith("A001")){
+            const cmd = message[1].toUpperCase();
+            if(cmd == "LOGIN") {
+                const username = message[2];
+                const password = message[3];
+                const data = fs.readFileSync(`./users/${username}.json`, 'utf8');
+                const parsedUserData = JSON.parse(data);
+                if(parsedUserData.user == user && parsedUserData.password == password){
+                    authUser = {user: user, password: password};
+                    socket.write('221 OK\r\n');      
+                } else {
+                    socket.write('221 ERROR\r\n');   
+                }   
+            }
+        }
+
+        else if(message.startsWith("A002")) {
+            const cmd = message[1].toUpperCase();
+            if(cmd === "LIST") {
+                const username = message[2];
+                const password = message[3];
+                const data = fs.readFileSync(`./users/${username}.json`, 'utf8');
+                const parsedUserData = JSON.parse(data);
+                if(parsedUserData.user === user && parsedUserData.password === password){
+                    authUser = {user: user, password: password};
+                    socket.write('221 OK\r\n');      
+                } else {
+                    socket.write('221 ERROR\r\n');   
+                }   
+            }
+
+            else if(cmd === SELECT && message[2].toUpperCase() === inbox) {
+                 mailData.currentState = "inbox";
+            }
+            else if(cmd == SEARCH && mailData.currentState === inbox){
+                const messageData = message[2].toUpperCase();
+                if(messageData === "ALL") {
+                    readMails(authUser.user);
+                } 
+            }
+        }
+
+        else if(message.startsWith("A003")) {
+            const cmd = message[1].toUpperCase();
+            if(cmd == "LOGOUT") {
+                socket.write(`* BYE IMAP4rev1 Server logging out\r\n`);
+                socket.end();
+            }
+        }
         // Unrecognized command
         else {
             socket.write('500 Unrecognized command\r\n');
