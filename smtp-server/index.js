@@ -1,13 +1,23 @@
 import net from 'net';
 import fs from 'fs';
 import readMails from './functions/readMails.js';
+import tls from 'tls';
+import nodemailer from 'nodemailer';
+import readDirs from './functions/readDirs.js';
+
+
+
+const options = {
+    key: fs.readFileSync('private-key.pem'),  // Yksityinen avain
+    cert: fs.readFileSync('certificate.pem'), // Sertifikaatti
+};
+
 // Define the SMTP server port
 const PORT = 2525; // Change this to 25 for real servers, 2525 for testing
 const inbox = "inbox";
 const SEARCH = "SEARCH";
 const SELECT = "SELECT";
 // List of clients connected to the server
-let clients = [];
 
 
 // Function to handle client connection
@@ -21,33 +31,37 @@ const  handleClient = (socket) => {
     };
     let user = "";
     let password = "";
-    let authUser = {};
+    let authUser = null;
     let jsonData = {};
-    let parsedUserData = {};
-
-    let loggedIn = false;
+    const ipAddr = socket.remoteAddress;
+    const blackList = [];
+    if(blackList.includes(ipAddr)){
+        socket.write('550 Sender IP is blacklisted\r\n');
+        console.log("??????")
+       // socket.end();
+    }
 
     socket.write('220 SimpleSMTPServer Ready\r\n');
 
     socket.on('data', (data) => {
-        const message = data.toString().trim();
+        const message = data.toString().trim().replace(/\r\n|\n|\r/g, '');;
+
+        const messageParts = message.trim().split(" ");
+        let cmd = messageParts[1];
         console.log("Received: ", message);
 
-        // Respond to the HELO command
-        if (message.startsWith('HELO')) {
+        if (messageParts[0].startsWith('HELO')) {
             socket.write('250 Hello, pleased to meet you\r\n');
         }
 
-        // Handle MAIL FROM command
-        else if (message.startsWith('MAIL FROM:')) {
+        else if (messageParts[0].startsWith('MAIL FROM:')) {
             const sender = message.split(':')[1].trim();
             mailData.from = sender;
             mailData.currentState = "MAIL FROM";
             socket.write('250 OK\r\n');
         }
 
-        // Handle RCPT TO command
-        else if (message.startsWith('RCPT TO:')) {
+        else if (messageParts[0].startsWith('RCPT TO:')) {
             const recipient = message.split(':')[1].trim();
             mailData.to.push(recipient);
             mailData.currentState = "RCPT TO";
@@ -55,7 +69,7 @@ const  handleClient = (socket) => {
         }
 
         // Handle DATA command
-        else if (message.startsWith('DATA')) {
+        else if (messageParts[0].startsWith('DATA')) {
             socket.write('354 End data with <CR><LF>.<CR><LF>\r\n');
             mailData.currentState = "DATA";
         }
@@ -63,15 +77,12 @@ const  handleClient = (socket) => {
         // Collect email body data
         else if (mailData.currentState === "DATA") {
             if (message === '.') {
-                // End of DATA, process the email
                 socket.write('250 OK Message accepted for delivery\r\n');
                 mailData.currentState = "COMPLETED";
                 jsonData = JSON.stringify(mailData, null, 2);
-                // Save message to a file (can be adjusted as needed)
                 for(let i = 0; i < mailData.to.length; i++) {
-                    fs.writeFileSync(`inbox/${mailData.to[i]}-${Date.now()}.json`, jsonData);
+                    fs.writeFileSync(`Maildir/inbox/${mailData.to[i]}-${Date.now()}.json`, jsonData);
                 }
-                // Clear data for next email
                 mailData = { from: null, to: [], data: [], currentState: "INIT" };
             } else {
                 // Collect message lines
@@ -79,87 +90,77 @@ const  handleClient = (socket) => {
             }
         }
 
-        else if (message.startsWith('USER')) {
+        else if (messageParts[0].startsWith('USER')) {
             mailData.currentState = "USER";
-            user = message.split(" ")[1];
-            socket.write('221 OK\r\n');
+            user = messageParts[1];
+            socket.write('221 OK SENT USER\r\n');
         }
 
-        else if (message.startsWith('PASS')) {
-            password =  message.split(" ")[1];
+
+        else if (messageParts[0].startsWith('PASS')) {
+            password =  messageParts[1];
+            console.log("???", user)
+            console.log("???", password+".")
             const data = fs.readFileSync(`./users/${user}.json`, 'utf8');
             const parsedUserData = JSON.parse(data);
-            if(parsedUserData.user == user && parsedUserData.password == password){
+            console.log(parsedUserData.password === password, parsedUserData.password.length, password.length);
+            if(parsedUserData.user === user && parsedUserData.password === password){
                 authUser = {user: user, password: password};
-                socket.write('221 OK\r\n');      
+                socket.write('221 OK AUTHENTICATED\r\n');      
             } else {
-                socket.write('221 ERROR\r\n');   
+                socket.write('221 ERROR UNAUTH\r\n');   
             }            
         }
 
-        else if (message.startsWith('LIST')) {
+        else if (messageParts[0].startsWith('LIST')) {
             if(authUser.user && authUser.password) {
-                readMails(authUser.user);
+                readMails(authUser.user, socket);
             }
             socket.write('221 OK\r\n');
         }
 
         // Handle QUIT command
-        else if (message.startsWith('QUIT')) {
+        else if (messageParts[0].startsWith('QUIT')) {
             socket.write('221 Bye\r\n');
-            socket.end();
+            //socket.end();
         }
 
-        else if(message.startsWith("A001")){
-            const cmd = message[1].toUpperCase();
-            if(cmd == "LOGIN") {
-                const username = message[2];
-                const password = message[3];
-                const data = fs.readFileSync(`./users/${username}.json`, 'utf8');
-                const parsedUserData = JSON.parse(data);
-                if(parsedUserData.user == user && parsedUserData.password == password){
-                    authUser = {user: user, password: password};
-                    socket.write('221 OK\r\n');      
-                } else {
-                    socket.write('221 ERROR\r\n');   
-                }   
-            }
+        //IMAP
+        else if(cmd === "LOGIN"){
+            const username = messageParts[2];
+            const password = messageParts[3];
+            
+            const data = fs.readFileSync(`./users/${username}.json`, 'utf8');
+            const parsedUserData = JSON.parse(data);
+
+            if(parsedUserData.user == username && parsedUserData.password == password){
+                authUser = {user: user, password: password};
+                socket.write('221 OK LOGIN COMPLETED\r\n');      
+            } else {
+                socket.write('221 ERROR FAILED LOGIN\r\n');   
+            }   
         }
 
-        else if(message.startsWith("A002")) {
-            const cmd = message[1].toUpperCase();
-            if(cmd === "LIST") {
-                const username = message[2];
-                const password = message[3];
-                const data = fs.readFileSync(`./users/${username}.json`, 'utf8');
-                const parsedUserData = JSON.parse(data);
-                if(parsedUserData.user === user && parsedUserData.password === password){
-                    authUser = {user: user, password: password};
-                    socket.write('221 OK\r\n');      
-                } else {
-                    socket.write('221 ERROR\r\n');   
-                }   
-            }
+        else if(cmd === "LIST" && authUser) {
 
-            else if(cmd === SELECT && message[2].toUpperCase() === inbox) {
-                 mailData.currentState = "inbox";
-            }
-            else if(cmd == SEARCH && mailData.currentState === inbox){
-                const messageData = message[2].toUpperCase();
-                if(messageData === "ALL") {
-                    readMails(authUser.user);
-                } 
+           readDirs(socket);
+        }
+        else if(cmd ===  SELECT && messageParts[2] === inbox) {
+            mailData.currentState = inbox;
+        }
+        else if(cmd === "FETCH" && messageParts[2] === "1:*" && messageParts[3] === "(BODY[])" ){
+            console.log("HALOO", mailData.currentState === inbox)
+            if( mailData.currentState === inbox) {
+                readMails(authUser.user, socket);
+            } else {
+                socket.write('221 ERROR\r\n');
             }
         }
 
-        else if(message.startsWith("A003")) {
-            const cmd = message[1].toUpperCase();
-            if(cmd == "LOGOUT") {
-                socket.write(`* BYE IMAP4rev1 Server logging out\r\n`);
-                socket.end();
-            }
+        else if(cmd === "LOGOUT") {
+            socket.write(`* BYE IMAP4rev1 Server logging out\r\n`);
+            //socket.end();
         }
-        // Unrecognized command
         else {
             socket.write('500 Unrecognized command\r\n');
         }
@@ -177,7 +178,7 @@ const  handleClient = (socket) => {
 };
 
 // Create the server and listen on the specified port
-const server = net.createServer(handleClient);
+const server = tls.createServer(options, handleClient);
 
 server.listen(PORT, () => {
     console.log(`SMTP Server listening on port ${PORT}`);

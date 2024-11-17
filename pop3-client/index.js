@@ -1,50 +1,46 @@
-// client.js
-import { createConnection } from 'net';
+import * as tls from 'tls';
 
 let i = 1;
 
-const client = createConnection(2525, 'localhost', () => {
-    console.log('Yhteys palvelimeen avattu.');
-    // Lähetetään viesti palvelimelle
-    client.write('MAIL FROM:owner');
+// TLS-yhteyden asetukset
+const options = {
+    host: 'localhost',
+    port: 2525, // Käytä oikeaa porttia, jossa palvelin odottaa TLS-yhteyttä
+    rejectUnauthorized: false, // Varmistaa, että hyväksytään vain luotetut palvelimet
+    // Voit lisätä sertifikaatin tai muun turvallisuuden tarpeen mukaan
+};
+
+const client = tls.connect(options, () => {
+    console.log('Yhteys palvelimeen avattu TLS-yhteydellä.');
+
+    // Lähetetään ensimmäinen komento (MAIL FROM)
+    client.write('MAIL FROM:owner\r\n');
 });
 
 // Vastaa palvelimen lähettämiin viesteihin
 client.on('data', (data) => {
     console.log('Palvelin:', data.toString());
-    // Suljetaan yhteys viestin vastaanottamisen jälkeen
-    //client.end();
+
+    // Lähetetään seuraavat komennot oikeassa järjestyksessä
     switch (i) {
         case 1:
-            client.write('RCPT TO:owner');
-            i++
+            // Lähetetään USER-komento
+            client.write("USER owner\r\n");
+            i++;
             break;
         case 2:
-            client.write('DATA');
-            i++
+            // Lähetetään PASS-komento
+            client.write("PASS 123\r\n");
+            i++;
             break;
         case 3:
-            client.write('Hello there');
-            i++
-            break;
-        case 4:
-            client.write('.');
-            i++
-            break;
-        case 5:
-            client.write("USER owner");
-            i++
-            break;
-        case 6:
-            client.write("PASS 123");
-            i++
-            break;
-        case 7:
-            client.write("LIST");
-            i++
+            // Lähetetään LIST-komento
+            client.write("LIST\r\n");
+            i++;
             break;
         default:
-          console.log(`Sorry, we are out of ${i}.`);
+            console.log(`Kaikki komennot on suoritettu.`);
+            client.end();  // Suljetaan yhteys, kun kaikki komennot on suoritettu
     }
 });
 
